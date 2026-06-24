@@ -827,4 +827,3 @@ Two changes were made to `scheduler.py` to prevent the daily API quota from bein
 | Improve Schedule page | Add click-through from a match card to the Match Detail page |
 | Add player photos | `photo_url` is stored in the players table but not yet displayed |
 =======
->>>>>>> 88a24aeb0317da9312ac82727b63fe2674b9066a
