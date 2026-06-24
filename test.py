@@ -77,3 +77,10 @@ y="variable"
 def my_func():
      print("this is a "+x+" "+y)
 my_func()
+
+response = requests.get(
+    f"{BASE_URL}/leagues",
+    params={"id": 1, "season": 2022},
+    headers={"x-apisports-key": API_KEY}
+)
+print("Requests remaining:", response.headers.get("x-ratelimit-requests-remaining"))

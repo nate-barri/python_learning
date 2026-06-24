@@ -238,8 +238,88 @@ def fetch_all_events():
         time.sleep(2)
 
 
+# --- Step 5: Fetch player stats for all finished matches ---
+def fetch_player_stats():
+    print("\nFetching player stats for completed matches...")
+
+    session = Session()
+    finished_statuses = ["FT", "AET", "PEN"]
+    matches = session.query(Match).filter(
+        Match.status.in_(finished_statuses)
+    ).all()
+    fixture_ids = [m.fixture_id for m in matches]
+    session.close()
+
+    print(f"  Found {len(fixture_ids)} finished matches.")
+
+    for fixture_id in fixture_ids:
+        results = api_get("fixtures/players", {"fixture": fixture_id})
+
+        if not results:
+            print("  Rate limit hit — waiting 60 seconds...")
+            time.sleep(60)
+            continue
+
+        session = Session()
+        saved = 0
+
+        for team_entry in results:
+            for p in team_entry.get("players", []):
+                info  = p["player"]
+                stats = p["statistics"][0] if p.get("statistics") else {}
+
+                # Skip if already saved for this fixture
+                existing = session.query(PlayerStat).filter_by(
+                    fixture_id = fixture_id,
+                    player_id  = info["id"]
+                ).first()
+                if existing:
+                    continue
+
+                # Save player if not already in players table
+                existing_player = session.get(Player, info["id"])
+                if not existing_player:
+                    player = Player(
+                        player_id = info["id"],
+                        name      = info["name"],
+                        photo_url = info.get("photo")
+                    )
+                    session.add(player)
+                    session.flush()
+
+                games    = stats.get("games", {})
+                shots    = stats.get("shots", {})
+                goals    = stats.get("goals", {})
+                passes   = stats.get("passes", {})
+                tackles  = stats.get("tackles", {})
+                cards    = stats.get("cards", {})
+
+                stat = PlayerStat(
+                    fixture_id     = fixture_id,
+                    player_id      = info["id"],
+                    rating         = float(games.get("rating") or 0),
+                    minutes_played = games.get("minutes") or 0,
+                    goals          = goals.get("total") or 0,
+                    assists        = goals.get("assists") or 0,
+                    shots_total    = shots.get("total") or 0,
+                    shots_on       = shots.get("on") or 0,
+                    passes_total   = passes.get("total") or 0,
+                    passes_key     = passes.get("key") or 0,
+                    tackles        = tackles.get("total") or 0,
+                    yellow_cards   = cards.get("yellow") or 0,
+                    red_cards      = cards.get("red") or 0
+                )
+                session.add(stat)
+                saved += 1
+
+        session.commit()
+        session.close()
+        print(f"  Saved {saved} player stats for fixture {fixture_id}.")
+        time.sleep(2)
+
 if __name__ == "__main__":
     fetch_teams()
     fetch_fixtures()
     fetch_standings()
-    # fetch_all_events()
+    fetch_all_events()
+    fetch_player_stats()

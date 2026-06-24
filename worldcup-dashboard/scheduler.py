@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 import os
 from dotenv import load_dotenv
 
-from database import Match
+from database import Match, Team
 from fetcher import (
     fetch_teams,
     fetch_fixtures,
@@ -20,7 +20,6 @@ from fetcher import (
 
 load_dotenv()
 
-# Set up basic logging so you can see what the scheduler is doing
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(message)s",
@@ -50,7 +49,11 @@ def live_update():
 
 
 def regular_update():
-    """Runs every 10 minutes — refreshes fixtures and standings."""
+    """
+    Runs every 60 minutes instead of 10.
+    Only refreshes fixtures and standings — not teams (rarely changes).
+    Saves ~4x requests per hour compared to the old version.
+    """
     log.info("Running regular update...")
     fetch_fixtures()
     fetch_standings()
@@ -58,27 +61,45 @@ def regular_update():
 
 
 def startup():
-    """Runs once when the scheduler starts."""
-    log.info("Running startup fetch...")
-    fetch_teams()
-    fetch_fixtures()
-    fetch_standings()
-    log.info("Startup fetch complete.")
+    """
+    Runs once on launch.
+    Checks if data already exists before fetching — avoids
+    wasting daily quota on data that's already in the database.
+    """
+    session = Session()
+    team_count    = session.query(Team).count()
+    match_count   = session.query(Match).count()
+    session.close()
+
+    if team_count == 0:
+        log.info("No teams found — fetching teams...")
+        fetch_teams()
+    else:
+        log.info(f"Teams already loaded ({team_count} teams) — skipping.")
+
+    if match_count == 0:
+        log.info("No fixtures found — fetching fixtures and standings...")
+        fetch_fixtures()
+        fetch_standings()
+    else:
+        log.info(f"Fixtures already loaded ({match_count} matches) — skipping.")
+
+    log.info("Startup complete.")
 
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
 
-    # Regular update every 10 minutes
+    # Regular update every 60 minutes (changed from 10)
     scheduler.add_job(
         regular_update,
         trigger="interval",
-        minutes=10,
+        minutes=60,
         id="regular_update",
         name="Refresh fixtures and standings"
     )
 
-    # Live update every 15 seconds
+    # Live update every 15 seconds — skips automatically if no live matches
     scheduler.add_job(
         live_update,
         trigger="interval",
@@ -87,17 +108,15 @@ if __name__ == "__main__":
         name="Fetch live match events"
     )
 
-    # Start the scheduler
     scheduler.start()
     log.info("Scheduler started.")
 
-    # Run startup fetch immediately
+    # Smart startup — skips if data already exists
     startup()
 
     log.info("Press Ctrl+C to stop.\n")
 
     try:
-        # Keep the script running
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
