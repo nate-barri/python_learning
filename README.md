@@ -1,16 +1,11 @@
 # python_learning
 will use to learn python
 
-<<<<<<< HEAD
-# World Cup Dashboard
-Day 1
 
 **Project Documentation**
 
-=======
 World cup project
 Day 1
->>>>>>> 88a24aeb0317da9312ac82727b63fe2674b9066a
 `Python` | `PostgreSQL` | `API-Football` | `Streamlit`
 
 | **Project** | **World Cup Sports Dashboard** |
@@ -377,9 +372,9 @@ To start Phase 4, run:
 pip install streamlit
 streamlit run dashboard.py
 ```
-<<<<<<< HEAD
 
-Streamlit will open the dashboard automatically in your browser at `http://localhost:8501`.
+
+
 
 
 
