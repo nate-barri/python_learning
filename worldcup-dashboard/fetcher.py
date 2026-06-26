@@ -96,7 +96,6 @@ def fetch_fixtures():
 
         existing = session.get(Match, f["id"])
         if existing:
-            # Update status and score if match already exists
             existing.status     = f["status"]["short"]
             existing.elapsed    = f["status"]["elapsed"]
             existing.home_goals = goals.get("home")
@@ -136,7 +135,6 @@ def fetch_standings():
     session = Session()
     saved = 0
 
-    # Standings come back as a list of groups
     all_groups = results[0]["league"]["standings"]
 
     for group in all_groups:
@@ -198,7 +196,6 @@ def fetch_all_events():
         results = api_get("fixtures/events", {"fixture": fixture_id})
 
         if not results:
-            # If rate limited, wait 60 seconds before continuing
             print("  Rate limit hit — waiting 60 seconds...")
             time.sleep(60)
             continue
@@ -233,9 +230,7 @@ def fetch_all_events():
         session.commit()
         session.close()
         print(f"  Saved {saved} events for fixture {fixture_id}.")
-
-        # Wait 2 seconds between each request to stay within the per-minute limit
-        time.sleep(2)
+        time.sleep(7)
 
 
 # --- Step 5: Fetch player stats for all finished matches ---
@@ -264,6 +259,9 @@ def fetch_player_stats():
         saved = 0
 
         for team_entry in results:
+            # FIX 1: get team_id from the response — each team_entry belongs to one team
+            team_id = team_entry["team"]["id"]
+
             for p in team_entry.get("players", []):
                 info  = p["player"]
                 stats = p["statistics"][0] if p.get("statistics") else {}
@@ -279,20 +277,25 @@ def fetch_player_stats():
                 # Save player if not already in players table
                 existing_player = session.get(Player, info["id"])
                 if not existing_player:
+                    # FIX 2: save team_id when creating the player
                     player = Player(
                         player_id = info["id"],
                         name      = info["name"],
-                        photo_url = info.get("photo")
+                        photo_url = info.get("photo"),
+                        team_id   = team_id
                     )
                     session.add(player)
                     session.flush()
+                elif existing_player.team_id is None:
+                    # FIX 3: update team_id if player exists but team was never set
+                    existing_player.team_id = team_id
 
-                games    = stats.get("games", {})
-                shots    = stats.get("shots", {})
-                goals    = stats.get("goals", {})
-                passes   = stats.get("passes", {})
-                tackles  = stats.get("tackles", {})
-                cards    = stats.get("cards", {})
+                games   = stats.get("games", {})
+                shots   = stats.get("shots", {})
+                goals   = stats.get("goals", {})
+                passes  = stats.get("passes", {})
+                tackles = stats.get("tackles", {})
+                cards   = stats.get("cards", {})
 
                 stat = PlayerStat(
                     fixture_id     = fixture_id,
@@ -315,11 +318,13 @@ def fetch_player_stats():
         session.commit()
         session.close()
         print(f"  Saved {saved} player stats for fixture {fixture_id}.")
-        time.sleep(2)
+        # FIX 4: increased from 2 to 7 seconds to respect per-minute rate limit
+        time.sleep(7)
+
 
 if __name__ == "__main__":
-    fetch_teams()
-    fetch_fixtures()
-    fetch_standings()
-    fetch_all_events()
+    # fetch_teams()       # already in DB
+    # fetch_fixtures()    # already in DB
+    # fetch_standings()   # already in DB
+    # fetch_all_events()  # already in DB
     fetch_player_stats()

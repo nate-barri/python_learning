@@ -155,17 +155,17 @@ def get_team_detail(team_id):
 
 
 def get_top_scorers():
-    """Return players with the most goals from the events table."""
+    """Return players with the most goals from player_stats — covers all 64 matches."""
     query = text("""
         SELECT
-            e.player_name,
-            t.name AS team,
-            COUNT(*) AS goals
-        FROM events e
-        JOIN teams t ON e.team_id = t.team_id
-        WHERE e.event_type = 'Goal'
-          AND e.detail NOT IN ('Own Goal', 'Missed Penalty')
-        GROUP BY e.player_name, t.name
+            p.name        AS player_name,
+            t.name        AS team,
+            SUM(ps.goals) AS goals
+        FROM player_stats ps
+        JOIN players p ON ps.player_id = p.player_id
+        JOIN teams t   ON p.team_id    = t.team_id
+        GROUP BY p.name, t.name
+        HAVING SUM(ps.goals) > 0
         ORDER BY goals DESC
         LIMIT 20
     """)
@@ -174,18 +174,17 @@ def get_top_scorers():
 
 
 def get_top_assists():
-    """Return players with the most assists from the events table."""
+    """Return players with the most assists from player_stats — covers all 64 matches."""
     query = text("""
         SELECT
-            e.assist_name  AS player_name,
-            t.name         AS team,
-            COUNT(*)       AS assists
-        FROM events e
-        JOIN teams t ON e.team_id = t.team_id
-        WHERE e.event_type = 'Goal'
-          AND e.assist_name IS NOT NULL
-          AND e.assist_name != ''
-        GROUP BY e.assist_name, t.name
+            p.name           AS player_name,
+            t.name           AS team,
+            SUM(ps.assists)  AS assists
+        FROM player_stats ps
+        JOIN players p ON ps.player_id = p.player_id
+        JOIN teams t   ON p.team_id    = t.team_id
+        GROUP BY p.name, t.name
+        HAVING SUM(ps.assists) > 0
         ORDER BY assists DESC
         LIMIT 20
     """)
@@ -194,17 +193,18 @@ def get_top_assists():
 
 
 def get_top_cards():
-    """Return players with the most yellow or red cards."""
+    """Return players with the most cards from player_stats — covers all 64 matches."""
     query = text("""
         SELECT
-            e.player_name,
-            t.name AS team,
-            COUNT(*) FILTER (WHERE e.detail = 'Yellow Card') AS yellow_cards,
-            COUNT(*) FILTER (WHERE e.detail = 'Red Card')    AS red_cards
-        FROM events e
-        JOIN teams t ON e.team_id = t.team_id
-        WHERE e.event_type = 'Card'
-        GROUP BY e.player_name, t.name
+            p.name               AS player_name,
+            t.name               AS team,
+            SUM(ps.yellow_cards) AS yellow_cards,
+            SUM(ps.red_cards)    AS red_cards
+        FROM player_stats ps
+        JOIN players p ON ps.player_id = p.player_id
+        JOIN teams t   ON p.team_id    = t.team_id
+        GROUP BY p.name, t.name
+        HAVING SUM(ps.yellow_cards) + SUM(ps.red_cards) > 0
         ORDER BY yellow_cards DESC, red_cards DESC
         LIMIT 20
     """)
@@ -275,8 +275,8 @@ def get_tournament_player_stats(team_name=None, group_name=None):
         FROM player_stats ps
         JOIN players p   ON ps.player_id  = p.player_id
         JOIN matches m   ON ps.fixture_id = m.fixture_id
-        JOIN teams t     ON (m.home_team_id = t.team_id OR m.away_team_id = t.team_id)
-        JOIN standings s ON t.team_id = s.team_id
+        JOIN teams t     ON p.team_id     = t.team_id
+        JOIN standings s ON t.team_id     = s.team_id
         {where}
         GROUP BY p.name, t.name, s.group_name
         ORDER BY goal_involvements DESC, avg_rating DESC
@@ -336,3 +336,40 @@ def get_all_player_names():
     with engine.connect() as conn:
         result = conn.execute(query)
         return [row[0] for row in result]
+
+
+def get_players_by_team(team_name):
+    """Return all player names for a specific team who have stats."""
+    query = text("""
+        SELECT DISTINCT p.name
+        FROM players p
+        JOIN teams t    ON p.team_id    = t.team_id
+        JOIN player_stats ps ON p.player_id = ps.player_id
+        WHERE t.name = :team_name
+          AND ps.minutes_played > 0
+        ORDER BY p.name
+    """)
+    with engine.connect() as conn:
+        result = conn.execute(query, {"team_name": team_name})
+        return [row[0] for row in result]
+
+
+def get_top_assist_providers():
+    """Return players with most goal assists — passes that directly led to goals."""
+    query = text("""
+        SELECT
+            TRIM(e.assist_name)  AS player_name,
+            t.name               AS team,
+            COUNT(*)             AS goal_assists
+        FROM events e
+        JOIN teams t ON e.team_id = t.team_id
+        WHERE e.event_type = 'Goal'
+          AND e.detail NOT IN ('Own Goal', 'Missed Penalty')
+          AND e.assist_name IS NOT NULL
+          AND TRIM(e.assist_name) != ''
+        GROUP BY TRIM(e.assist_name), t.name
+        ORDER BY goal_assists DESC
+        LIMIT 20
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn)
