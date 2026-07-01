@@ -822,3 +822,418 @@ Two changes were made to `scheduler.py` to prevent the daily API quota from bein
 | Improve Schedule page | Add click-through from a match card to the Match Detail page |
 | Add player photos | `photo_url` is stored in the players table but not yet displayed |
 =======
+
+
+Day 3 and 4
+
+
+# World Cup Dashboard
+
+**Session 3 — Data Completion & Player Analytics**
+
+`Player Stats` | `Radar Chart` | `Discipline` | `Goals by Time`
+
+| **Project** | **World Cup Sports Dashboard** |
+|---|---|
+| Author | Nathaniel |
+| Session | 3 — Data Completion and Analytics |
+| Focus | `fetch_player_stats`, team_id bug fix, Player Stats page expansion |
+| Date | July 1, 2026 |
+
+---
+
+## 1. Session Overview
+
+This session focused on completing the data pipeline by fully populating the `player_stats` table, fixing a critical team assignment bug in the `players` table, and expanding the Player Stats dashboard page with three new analytical tabs.
+
+| **Area** | **Work done** |
+|---|---|
+| Data fetching | Ran `fetch_player_stats()` to populate 3,230 player stat rows across 64 matches |
+| Bug fix | Fixed `team_id` being `NULL` for all players — caused players to appear under wrong teams |
+| Query fix | Fixed wrong JOIN in `get_tournament_player_stats()` that duplicated players across both match teams |
+| Top scorers fix | Switched `get_top_scorers/assists/cards` from events table to `player_stats` for full tournament accuracy |
+| Player Deep Dive | Added team filter so you can browse players by team before selecting |
+| New tab — Radar Chart | SVG radar chart comparing up to 2 players across 6 metrics |
+| New tab — Goals by Time | Horizontal bar chart showing goals scored in each 15-minute interval |
+| New tab — Discipline | Team discipline table with yellow cards, red cards, and discipline points |
+
+---
+
+## 2. Final Database Status
+
+After this session all six tables are fully populated. The database is complete for the 2022 World Cup.
+
+| **Table** | **Records** | **Status** |
+|---|---|---|
+| `teams` | 32 | Complete |
+| `matches` | 64 | Complete |
+| `standings` | 32 | Complete |
+| `events` | 435 | Complete — goals, cards, subs, VAR |
+| `players` | 830+ | Complete — `team_id` now correctly populated |
+| `player_stats` | 3,230 | Complete — all 64 matches fetched |
+
+---
+
+## 3. Problems Encountered and Fixes
+
+### Problem 1 — fetch_all_events() hitting rate limit immediately
+
+```
+API error on /fixtures/events: {'rateLimit': 'Too many requests. You have reached your per-minute request limit.'}
+```
+
+**Cause**
+
+The sleep between requests was set to 2 seconds. The free tier allows approximately 1 request every 6–7 seconds, not every 2. Additionally, `fetch_teams`, `fetch_fixtures`, and `fetch_standings` were all running on every execution, wasting 3 requests before events even started.
+
+**Fix**
+
+- Changed `time.sleep(2)` to `time.sleep(7)` throughout all fetch functions
+- Commented out `fetch_teams`, `fetch_fixtures`, `fetch_standings` in the `__main__` block since data was already in the database
+
+```python
+# Before
+time.sleep(2)
+
+# After
+time.sleep(7)  # free tier allows ~1 request per 6-7 seconds
+```
+
+---
+
+### Problem 2 — Events fetching but saving 0 rows
+
+```
+Saved 0 events for fixture 855736.
+Saved 0 events for fixture 855735.
+...
+```
+
+**Cause**
+
+Events were already in the database from a previous partial run. The duplicate check was correctly skipping them. This was not actually an error — the data was already there.
+
+**Fix**
+
+No fix needed. Verified the events table was fully populated with:
+
+```sql
+SELECT COUNT(*) FROM events;  -- returned 435
+```
+
+---
+
+### Problem 3 — Daily API quota drained before fetching was complete
+
+```
+API error: 'You have reached the request limit for the day.'
+Requests remaining: 0
+```
+
+**Cause**
+
+`fetch_player_stats()` requires 64 requests (one per finished match). Combined with 3 wasted requests from `fetch_teams/fixtures/standings` running unnecessarily on startup, and leftover usage from the scheduler, the quota ran out before all 64 matches were fetched. Only 8 matches had player stats saved.
+
+**Fix**
+
+- Ran `fetch_player_stats()` alone the next day with all other fetches commented out
+- Verified with `SELECT COUNT(DISTINCT fixture_id) FROM player_stats;` — confirmed 64
+
+```python
+if __name__ == '__main__':
+    # fetch_teams()       # skip — already in DB
+    # fetch_fixtures()    # skip — already in DB
+    # fetch_standings()   # skip — already in DB
+    # fetch_all_events()  # skip — already in DB
+    fetch_player_stats()  # only this
+```
+
+---
+
+### Problem 4 — Players appearing under wrong teams in Player Stats
+
+```
+Enner Valencia  Ecuador   1  77  2  0 ...
+Enner Valencia  Qatar     1  77  2  0 ...
+Olivier Giroud  France    1  89  2  0 ...
+Olivier Giroud  Australia 1  89  2  0 ...
+```
+
+**Cause**
+
+Two separate bugs combined to cause this. First, the JOIN in `get_tournament_player_stats()` was joining teams on both `home_team_id` and `away_team_id`, so every player got duplicated for both teams in the match. Second, the `team_id` column in the `players` table was `NULL` for all players because `fetch_player_stats()` was saving players without setting their `team_id`.
+
+**Fix 1 — Wrong JOIN in get_tournament_player_stats()**
+
+```sql
+-- Wrong — joins both teams in the match
+JOIN teams t ON (m.home_team_id = t.team_id OR m.away_team_id = t.team_id)
+
+-- Correct — joins through the player's own team_id
+JOIN teams t ON p.team_id = t.team_id
+```
+
+**Fix 2 — team_id NULL in players table**
+
+Updated `fetch_player_stats()` to extract the `team_id` from the API response and save it when creating or updating a player record:
+
+```python
+for team_entry in results:
+    team_id = team_entry['team']['id']  # <- get team from response
+    for p in team_entry.get('players', []):
+        existing_player = session.get(Player, info['id'])
+        if not existing_player:
+            player = Player(
+                player_id = info['id'],
+                name      = info['name'],
+                photo_url = info.get('photo'),
+                team_id   = team_id  # <- now saved correctly
+            )
+        elif existing_player.team_id is None:
+            existing_player.team_id = team_id  # <- fix existing NULLs
+```
+
+**Recovery — TRUNCATE and re-fetch**
+
+Since the bad data was already in the database, both tables were truncated and the fetcher re-ran with the fixed code:
+
+```sql
+TRUNCATE TABLE player_stats;
+TRUNCATE TABLE players CASCADE;
+```
+
+---
+
+### Problem 4b — numpy.int64 type error when querying by team_id
+
+```
+pandas.errors.DatabaseError: Execution failed on sql
+psycopg2.ProgrammingError: can't adapt type 'numpy.int64'
+[parameters: {'tid': np.int64(2382)}]
+```
+
+**Cause**
+
+When pandas reads data from PostgreSQL into a DataFrame, integers are stored as `numpy.int64` — a NumPy-specific type. When that `team_id` value was then passed as a parameter into a new SQL query, psycopg2 did not recognise it as a valid type. It only accepts plain Python `int`.
+
+```
+PostgreSQL → pandas DataFrame → numpy.int64 → back into PostgreSQL  <- ERROR
+```
+
+**Fix**
+
+Added a single `int()` conversion at the top of `get_team_detail()` in `utils/db.py`:
+
+```python
+def get_team_detail(team_id):
+    team_id = int(team_id)  # convert numpy.int64 to plain Python int
+    query = text("""SELECT ... WHERE home_team_id = :tid ...""")
+```
+
+> **Note:** This is a common gotcha whenever DataFrame values are passed back into SQL queries. Always wrap IDs with `int()` or `str()` before using them as query parameters.
+
+---
+
+### Problem 5 — Top Scorers showing wrong goal counts
+
+```
+Enner Valencia   Ecuador  3  (should be 3 — group stage only)
+Kylian Mbappe    France   2  (should be 8 — full tournament)
+```
+
+**Cause**
+
+`get_top_scorers()`, `get_top_assists()`, and `get_top_cards()` were reading from the `events` table, which only had events for matches fetched before quota ran out — not all 64. The `player_stats` table covers all 64 matches and has accurate goal/assist/card counts per player per match.
+
+**Fix**
+
+Rewrote all three functions to read from `player_stats` joined to `players` and `teams`:
+
+```python
+def get_top_scorers():
+    query = text("""
+        SELECT p.name AS player_name, t.name AS team, SUM(ps.goals) AS goals
+        FROM player_stats ps
+        JOIN players p ON ps.player_id = p.player_id
+        JOIN teams t   ON p.team_id    = t.team_id
+        GROUP BY p.name, t.name
+        HAVING SUM(ps.goals) > 0
+        ORDER BY goals DESC LIMIT 20
+    """)
+```
+
+After the fix: Mbappé showed 8 goals (correct — 2022 Golden Boot), Messi showed 7 goals (correct).
+
+---
+
+### Problem 6 — Player Deep Dive stuck when 'All Teams' selected
+
+```
+Selecting 'All Teams' caused the player selectbox to not update.
+Players from other teams could not be selected.
+```
+
+**Cause**
+
+The `player_names` list was being loaded inside the `with col_player:` block, which only executed after the team selectbox was rendered. This caused a Streamlit rendering order issue where the player list didn't update correctly when switching between teams.
+
+**Fix**
+
+Moved the `player_names` loading outside the column context block so it executes before either column renders:
+
+```python
+# Wrong — inside the column block
+with col_player:
+    if selected_team == 'All Teams':
+        player_names = get_all_player_names()
+
+# Correct — outside columns, runs first
+player_names = (get_all_player_names() if selected_team == 'All Teams'
+                else get_players_by_team(selected_team))
+
+with col_player:
+    selected_player = st.selectbox('Select Player', player_names)
+```
+
+---
+
+## 4. New Functions Added
+
+### fetcher.py — fetch_player_stats()
+
+Fetches per-match player statistics from `GET /fixtures/players` for every finished match. Saves data to both the `players` and `player_stats` tables. Includes the `team_id` fix so every player is correctly assigned to their team.
+
+| **Detail** | **Value** |
+|---|---|
+| Endpoint | `GET /fixtures/players?fixture=FIXTURE_ID` |
+| Data saved | `rating`, `minutes_played`, `goals`, `assists`, `shots_total`, `shots_on`, `passes_total`, `passes_key`, `tackles`, `yellow_cards`, `red_cards`, `team_id` |
+| Rate limiting | `time.sleep(7)` between each fixture |
+| Requests used | 64 for the full 2022 tournament |
+| Result | 3,230 rows in `player_stats` across 64 matches |
+
+---
+
+### utils/db.py — New Query Functions
+
+| **Function** | **What it does** |
+|---|---|
+| `get_players_by_team(team)` | Returns all player names for a team who have stats — powers the team filter in Player Deep Dive |
+| `get_top_assist_providers()` | Returns players with most goal assists from `events` table — direct passes that led to goals |
+| `get_tournament_player_stats()` | Fixed JOIN — now joins teams through `p.team_id` instead of match home/away team IDs |
+| `get_top_scorers()` | Rewritten — now reads from `player_stats` not `events` for full tournament accuracy |
+| `get_top_assists()` | Rewritten — now reads from `player_stats` not `events` |
+| `get_top_cards()` | Rewritten — now reads from `player_stats` not `events` |
+| `get_goals_by_interval_simple()` | Returns goal counts bucketed into 8 × 15-minute intervals using SQL `CASE` |
+| `get_team_discipline()` | Returns yellow cards, red cards, and discipline points per team (`discipline_points = yellows + reds × 3`) |
+| `get_radar_stats(player)` | Returns 6 aggregated metrics for a player: goals, assists, shots, key passes, tackles, avg rating |
+
+---
+
+## 5. New Player Stats Tabs
+
+Three new tabs were added to `pages/5_Player_Stats.py`. The page now has 7 tabs in total.
+
+| **Tab** | **What it shows** |
+|---|---|
+| 1 — Top Scorers & Assists | Leaderboards for goals, assists, passes to goals, and cards — now sourced from `player_stats` for full accuracy |
+| 2 — Tournament Stats | Full player table with category switcher — no change |
+| 3 — By Team / Group | Team/group filter view — no change |
+| 4 — Player Deep Dive | Added team filter dropdown above player selector — fixes the All Teams selection bug |
+| 5 — Radar Chart | **NEW** — SVG radar chart comparing up to 2 players across 6 normalised metrics |
+| 6 — Goals by Time | **NEW** — Horizontal bar chart of goals scored in each 15-minute interval with summary metrics |
+| 7 — Discipline | **NEW** — Team discipline table ranked by discipline points with color-coded badges |
+
+---
+
+### Radar Chart — Technical Detail
+
+The radar chart is built with pure SVG — no external charting library needed. It renders inside `st.markdown()` with `unsafe_allow_html=True`.
+
+| **Detail** | **Value** |
+|---|---|
+| Metrics shown | Goals, Assists, Shots, Key Passes, Tackles, Avg Rating |
+| Normalisation | Each metric scaled 0–10 against tournament approximate maximums |
+| Max values used | Goals=8, Assists=5, Shots=30, Key Passes=20, Tackles=30, Rating=10 |
+| Player 2 | Optional — shown in red polygon overlay on the same chart |
+| Raw values | Shown in a table below the chart for exact comparison |
+| Team filter | Both players have independent team filters for easier selection |
+
+---
+
+### Goals by Time — Technical Detail
+
+Goals are bucketed into 8 × 15-minute intervals using a SQL `CASE` statement on the `minute` column. Extra time goals (`minute > 90`) go into the `90+` bucket. Stoppage time goals at the end of the first half (`minute = 46`) go into the `45+` bucket.
+
+| **Interval** | **Minute range** |
+|---|---|
+| 1–15 | 1 to 15 |
+| 16–30 | 16 to 30 |
+| 31–45 | 31 to 45 |
+| 45+ | `minute = 46` (stoppage time) |
+| 46–60 | 47 to 60 |
+| 61–75 | 61 to 75 |
+| 76–90 | 76 to 90 |
+| 90+ | `minute > 90` |
+
+---
+
+## 6. Verification Queries Used
+
+These queries were used throughout the session to verify data integrity after each fix.
+
+```sql
+-- Confirm all 64 matches have player stats
+SELECT COUNT(DISTINCT fixture_id) FROM player_stats;
+-- Expected: 64
+
+-- Confirm total player stat rows
+SELECT COUNT(*) FROM player_stats;
+-- Expected: 3,230+
+
+-- Verify Mbappe has all 7 matches
+SELECT ps.fixture_id, ps.goals, ps.assists, ps.minutes_played
+FROM player_stats ps
+JOIN players p ON ps.player_id = p.player_id
+WHERE p.name = 'Kylian Mbappé';
+-- Expected: 7 rows
+
+-- Verify Valencia only shows Ecuador (not Qatar)
+SELECT p.name, t.name AS team
+FROM players p
+JOIN teams t ON p.team_id = t.team_id
+WHERE p.name ILIKE '%Valencia%';
+-- Expected: Enner Valencia │ Ecuador only
+
+-- Confirm events table breakdown
+SELECT event_type, COUNT(*) FROM events GROUP BY event_type;
+-- Expected: Goal=73, Card=102, subst=246, Var=14
+```
+
+---
+
+## 7. Current Project State
+
+| **Item** | **Status** |
+|---|---|
+| Database — all 6 tables | Fully populated |
+| Scheduler | Running with smart startup and 60-min refresh |
+| Page 1 — Standings | Complete |
+| Page 2 — Schedule | Complete |
+| Page 3 — Match Detail | Complete — events show after `fetch_all_events()` |
+| Page 4 — Teams | Complete |
+| Page 5 — Player Stats | Complete — 7 tabs including radar, goals by time, discipline |
+| Page 6 — Live Scores | Complete — activates with 2026 data |
+| 2026 season data | Pending — requires paid API plan upgrade |
+| Pitch visualizations | Deferred to future session |
+
+---
+
+## 8. Next Steps
+
+| **Task** | **Detail** |
+|---|---|
+| Upgrade API plan | Switch season from `2022` to `2026` to access current tournament data |
+| Pitch formation map | Fetch lineups from `GET /fixtures/lineups` — needs separate fetch function |
+| Match stats panel | Fetch fixture statistics from `GET /fixtures/statistics` — possession, corners, fouls |
+| Goal heatmap | Requires shot coordinate data — not available on free tier |
+| Documentation consolidation | Merge all 3 session docs into one master reference document |
